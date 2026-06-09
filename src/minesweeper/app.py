@@ -19,6 +19,8 @@ def run(argv: list[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--spectate-game-id", default=None)
+    parser.add_argument("--api-base-url", default="http://127.0.0.1:8000")
     args = parser.parse_args(argv)
 
     mode = os.getenv("APP_MODE", "terminal").lower()
@@ -49,6 +51,8 @@ def run(argv: list[str] | None = None) -> None:
             height=args.height,
             mine_density=args.mine_density,
             seed=args.seed,
+            spectate_game_id=args.spectate_game_id or os.getenv("SPECTATE_GAME_ID"),
+            api_base_url=args.api_base_url,
         )
         return
 

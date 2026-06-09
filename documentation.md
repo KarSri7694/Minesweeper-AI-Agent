@@ -97,6 +97,31 @@ GUI controls:
 - `R`: restart the current board
 - `Esc`: quit
 
+### GUI Spectator Mode For API Games
+
+If the AI is playing through the HTTP API, you can open the `pygame` window as a read-only spectator for that same `game_id`.
+
+Example:
+
+```powershell
+$env:APP_MODE = "api"
+venv\Scripts\python src\game.py --host 127.0.0.1 --port 8000
+```
+
+In another PowerShell window, start the AI client and note the `game_id`, then open the spectator:
+
+```powershell
+$env:APP_MODE = "gui"
+venv\Scripts\python src\game.py --spectate-game-id YOUR_GAME_ID --api-base-url http://127.0.0.1:8000
+```
+
+Notes:
+
+- Spectator mode refreshes the board automatically from the API
+- Mouse play is disabled while spectating
+- `R` restart is disabled while spectating
+- `Esc` closes the spectator window
+
 ### API Mode
 
 ```powershell
@@ -135,7 +160,8 @@ Request body:
   "width": 9,
   "height": 9,
   "mine_density": 0.15,
-  "seed": 7
+  "seed": 7,
+  "output_format": "detailed"
 }
 ```
 
@@ -145,10 +171,15 @@ Fields:
 - `height`: board height
 - `mine_density`: optional, must be between `0` and `1`
 - `seed`: optional, useful for deterministic test runs
+- `output_format`: optional, either `detailed` or `compact`
 
 ### Get Current Game State
 
 `GET /games/{game_id}`
+
+Optional query parameter:
+
+- `output_format=detailed|compact`
 
 Returns:
 
@@ -157,6 +188,18 @@ Returns:
 - move count
 - visible board state
 - status
+
+### Get Current Game State With Request Body
+
+`POST /games/{game_id}/state`
+
+Request body:
+
+```json
+{
+  "output_format": "compact"
+}
+```
 
 ### Submit A Move
 
@@ -168,7 +211,8 @@ Request body:
 {
   "action": "reveal",
   "x": 0,
-  "y": 0
+  "y": 0,
+  "output_format": "compact"
 }
 ```
 
@@ -182,6 +226,7 @@ The response includes:
 - updated game state
 - score delta for the last move
 - move metadata
+- requested board output format
 
 ## Game State Shape
 
@@ -199,6 +244,31 @@ The serialized game state includes fields such as:
 - `board`
 
 During active play, hidden mines are not exposed through the API.
+
+### Output Formats
+
+#### `detailed`
+
+This is the original response shape where `board` is a 2D array of tile objects.
+
+#### `compact`
+
+In compact mode, `board` is a 2D array of strings:
+
+- `.` for unrevealed tiles
+- `_` for revealed tiles with zero adjacent mines
+- `"1"` to `"8"` for revealed numbered tiles
+- `F` for flagged tiles
+- `B` for bombs visible after a loss
+
+Example compact board:
+
+```text
+. . . 1
+_ F 1 .
+_ 2 3 _
+_ _ _ _
+```
 
 ## Testing
 

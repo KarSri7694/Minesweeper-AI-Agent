@@ -221,6 +221,23 @@ class GameEngine:
             "board": board,
         }
 
+    def compact_state(self) -> dict:
+        board = []
+        for row in self._board:
+            board.append([self._compact_tile_value(tile) for tile in row])
+        return {
+            "game_id": self.game_id,
+            "status": self.status.value,
+            "width": self.config.width,
+            "height": self.config.height,
+            "mine_count": self.mine_count,
+            "flagged_count": self.flagged_count,
+            "score": self.score,
+            "move_count": self.move_count,
+            "end_reason": self.end_reason,
+            "board": board,
+        }
+
     def _serialize_tile(self, tile: Tile) -> dict:
         if self.status is GameStatus.IN_PROGRESS:
             if tile.is_flagged:
@@ -248,6 +265,17 @@ class GameEngine:
             "adjacent_mines": tile.adjacent_mines if tile.is_revealed or not tile.is_mine else None,
             "is_mine": tile.is_mine,
         }
+
+    def _compact_tile_value(self, tile: Tile) -> str:
+        if tile.is_flagged:
+            return "F"
+        if self.status is GameStatus.LOST and tile.is_mine:
+            return "B"
+        if not tile.is_revealed:
+            return "."
+        if tile.adjacent_mines == 0:
+            return "0"
+        return str(tile.adjacent_mines)
 
 
 class GameManager:

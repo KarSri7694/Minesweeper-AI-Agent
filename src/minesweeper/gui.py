@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
+
 import pygame
 
 from .engine import GameEngine, GameManager, GameStatus
@@ -32,35 +36,70 @@ MIN_TILE_SIZE = 28
 MAX_TILE_SIZE = 56
 
 
+def fetch_remote_state(api_base_url: str, game_id: str) -> dict:
+    normalized_base_url = api_base_url.rstrip("/")
+    url = f"{normalized_base_url}/games/{game_id}?output_format=detailed"
+    with urlopen(url, timeout=2.0) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def run_gui_game(
     manager: GameManager,
     width: int,
     height: int,
     mine_density: float,
     seed: int | None = None,
+    spectate_game_id: str | None = None,
+    api_base_url: str = "http://127.0.0.1:8000",
 ) -> None:
     pygame.init()
     pygame.display.set_caption("Minesweeper LLM")
 
-    game = manager.create_game(width=width, height=height, mine_density=mine_density, seed=seed)
-    tile_size = _choose_tile_size(width, height)
-    board_width = width * tile_size
-    board_height = height * tile_size
-    screen_width = board_width + (PADDING * 2)
-    screen_height = HUD_HEIGHT + board_height + FOOTER_HEIGHT + (PADDING * 2)
+    game = None
+    current_state = None
+    spectator_mode = spectate_game_id is not None
+    last_fetch_at = 0
+    fetch_interval_ms = 250
 
-    screen = pygame.display.set_mode((screen_width, screen_height))
+    if spectator_mode:
+        try:
+            current_state = fetch_remote_state(api_base_url, spectate_game_id)
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+            pygame.quit()
+            raise RuntimeError(
+                f"Unable to fetch game '{spectate_game_id}' from {api_base_url}: {exc}"
+            ) from exc
+        width = current_state["width"]
+        height = current_state["height"]
+    else:
+        game = manager.create_game(width=width, height=height, mine_density=mine_density, seed=seed)
+        current_state = game.visible_state()
+
+    screen = _create_screen(width, height)
     clock = pygame.time.Clock()
     title_font = pygame.font.SysFont("consolas", 28, bold=True)
     body_font = pygame.font.SysFont("consolas", 20)
+    tile_size = _choose_tile_size(width, height)
     tile_font = pygame.font.SysFont("consolas", max(18, tile_size // 2), bold=True)
 
     board_origin_x = PADDING
     board_origin_y = HUD_HEIGHT
-    message = "Left click to reveal. Right click to flag. Press R to restart."
+    if spectator_mode:
+        message = f"Watching API game {spectate_game_id}. Refreshes automatically."
+    else:
+        message = "Left click to reveal. Right click to flag. Press R to restart."
 
     running = True
     while running:
+        if spectator_mode:
+            now = pygame.time.get_ticks()
+            if now - last_fetch_at >= fetch_interval_ms:
+                try:
+                    current_state = fetch_remote_state(api_base_url, spectate_game_id)
+                    last_fetch_at = now
+                except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+                    message = f"API sync failed: {exc}"
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -71,14 +110,21 @@ def run_gui_game(
                     running = False
                     continue
                 if event.key == pygame.K_r:
+                    if spectator_mode:
+                        message = "Restart is disabled while spectating an API game."
+                        continue
                     game = manager.create_game(
                         width=width,
                         height=height,
                         mine_density=mine_density,
                         seed=seed,
                     )
+                    current_state = game.visible_state()
                     message = "New game started."
                     continue
+
+            if spectator_mode:
+                continue
 
             if event.type == pygame.MOUSEBUTTONDOWN:
                 tile_pos = _mouse_to_tile(
@@ -99,12 +145,13 @@ def run_gui_game(
                     elif event.button == 3:
                         result = game.flag(x, y)
                         message = f"{result.message} score {result.score_delta:+d}"
+                    current_state = game.visible_state()
                 except ValueError as exc:
                     message = str(exc)
 
         _draw(
             screen=screen,
-            game=game,
+            state=current_state,
             tile_size=tile_size,
             board_origin_x=board_origin_x,
             board_origin_y=board_origin_y,
@@ -112,11 +159,21 @@ def run_gui_game(
             body_font=body_font,
             tile_font=tile_font,
             message=message,
+            spectator_mode=spectator_mode,
         )
         pygame.display.flip()
         clock.tick(60)
 
     pygame.quit()
+
+
+def _create_screen(width: int, height: int) -> pygame.Surface:
+    tile_size = _choose_tile_size(width, height)
+    board_width = width * tile_size
+    board_height = height * tile_size
+    screen_width = board_width + (PADDING * 2)
+    screen_height = HUD_HEIGHT + board_height + FOOTER_HEIGHT + (PADDING * 2)
+    return pygame.display.set_mode((screen_width, screen_height))
 
 
 def _choose_tile_size(width: int, height: int) -> int:
@@ -147,7 +204,7 @@ def _mouse_to_tile(
 
 def _draw(
     screen: pygame.Surface,
-    game: GameEngine,
+    state: dict,
     tile_size: int,
     board_origin_x: int,
     board_origin_y: int,
@@ -155,23 +212,24 @@ def _draw(
     body_font: pygame.font.Font,
     tile_font: pygame.font.Font,
     message: str,
+    spectator_mode: bool,
 ) -> None:
     screen.fill(BACKGROUND)
-    state = game.visible_state()
-    board_width = game.config.width * tile_size
-    board_height = game.config.height * tile_size
+    board_width = state["width"] * tile_size
+    board_height = state["height"] * tile_size
+    status_value = state["status"]
 
     title = title_font.render("Minesweeper LLM", True, TEXT)
     screen.blit(title, (PADDING, 18))
 
     status_text = (
-        f"Status: {game.status.value}   Score: {game.score}   Flags: {game.flagged_count}/{game.mine_count}"
+        f"Status: {status_value}   Score: {state['score']}   Flags: {state['flagged_count']}/{state['mine_count']}"
     )
     screen.blit(body_font.render(status_text, True, TEXT), (PADDING, 52))
 
-    if game.status is GameStatus.WON:
+    if status_value == GameStatus.WON.value:
         message_color = NUMBER_COLORS[2]
-    elif game.status is GameStatus.LOST:
+    elif status_value == GameStatus.LOST.value:
         message_color = NUMBER_COLORS[3]
     else:
         message_color = SUBTEXT
@@ -195,7 +253,10 @@ def _draw(
                 tile_font=tile_font,
             )
 
-    controls = "Left click reveal | Right click flag | R restart | Esc quit"
+    if spectator_mode:
+        controls = "Watching API session | Auto refresh | Esc quit"
+    else:
+        controls = "Left click reveal | Right click flag | R restart | Esc quit"
     footer_y = board_origin_y + board_height + 14
     screen.blit(body_font.render(controls, True, SUBTEXT), (PADDING, footer_y))
 
