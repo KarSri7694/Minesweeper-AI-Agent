@@ -1,6 +1,8 @@
 venv/
 datasets/
+*.jsonl
+.pytest_cache/
+diagnostic_dataset/
 __pycache__/
 *.py[codz]
 *$py.class
-minesweeper/dataset/transitions.jsonl

@@ -49,13 +49,17 @@ Notes:
 
 ## Requirements
 
-Python 3.11 is currently used in this workspace.
+Python 3.13 is currently used in this workspace.
 
 Dependencies:
 
 - `fastapi`
+- `numpy`
+- `openai`
 - `uvicorn`
 - `pygame`
+- `pytest`
+- `requests`
 
 ## Running The App
 
@@ -256,10 +260,98 @@ This is the original response shape where `board` is a 2D array of tile objects.
 In compact mode, `board` is a 2D array of strings:
 
 - `.` for unrevealed tiles
+- `F` for flagged tiles
 - `_` for revealed tiles with zero adjacent mines
 - `"1"` to `"8"` for revealed numbered tiles
-- `F` for flagged tiles
 - `B` for bombs visible after a loss
+
+## Dataset And Fine-Tuning Workflow
+
+Run commands from the repository root on macOS using `venv/bin/python3`.
+
+### Generate Raw Transition Data
+
+```bash
+venv/bin/python3 src/minesweeper/solve_algo.py --rows 9 --cols 9 --mines 0.15 --games 1000 --filename games_9x9_1000.jsonl --output datasets/generated
+```
+
+This writes transition records to `datasets/generated/games_9x9_1000.jsonl`.
+
+### Convert To Chat Fine-Tuning JSONL
+
+Create the full dataset:
+
+```bash
+venv/bin/python3 src/dataset_generator.py --input datasets/generated/games_9x9_1000.jsonl --output datasets/finetune/minesweeper_9x9_1000_all_finetune.jsonl
+```
+
+Create a safer dataset that skips moves which immediately led to a loss:
+
+```bash
+venv/bin/python3 src/dataset_generator.py --input datasets/generated/games_9x9_1000.jsonl --output datasets/finetune/minesweeper_9x9_1000_safe_finetune.jsonl --skip-terminal-losses
+```
+
+Inspect examples:
+
+```bash
+venv/bin/python3 scripts/inspect_finetune_data.py --input datasets/finetune/minesweeper_9x9_1000_safe_finetune.jsonl --count 3
+```
+
+Check action and coordinate distribution:
+
+```bash
+venv/bin/python3 scripts/check_action_distribution.py --input datasets/finetune/minesweeper_9x9_1000_safe_finetune.jsonl
+```
+
+### Split Train And Validation Data
+
+```bash
+venv/bin/python3 scripts/split_finetune_data.py --input datasets/finetune/minesweeper_9x9_1000_safe_finetune.jsonl --train-output datasets/finetune/train.jsonl --val-output datasets/finetune/val.jsonl --val-ratio 0.1 --seed 42
+```
+
+### Start An OpenAI Fine-Tuning Job
+
+Do not put API keys in files. Export `OPENAI_API_KEY` in your shell or prefix the command locally.
+
+```bash
+OPENAI_API_KEY=... venv/bin/python3 scripts/start_openai_finetune.py --train datasets/finetune/train.jsonl --val datasets/finetune/val.jsonl --model <base-model-name> --suffix minesweeper-9x9
+```
+
+The script uploads the train and validation JSONL files with `purpose="fine-tune"`, starts a supervised fine-tuning job, prints the uploaded file IDs and job ID, and writes metadata to:
+
+```text
+datasets/finetune/openai_finetune_job.json
+```
+
+### Check Fine-Tuning Status
+
+Read the latest saved job metadata:
+
+```bash
+OPENAI_API_KEY=... venv/bin/python3 scripts/check_openai_finetune.py
+```
+
+Or pass a job ID directly:
+
+```bash
+OPENAI_API_KEY=... venv/bin/python3 scripts/check_openai_finetune.py --job-id <fine-tuning-job-id>
+```
+
+### Evaluate A Fine-Tuned Model
+
+Keep evaluation small at first to control API cost:
+
+```bash
+OPENAI_API_KEY=... venv/bin/python3 scripts/evaluate_finetuned_model.py --model <fine-tuned-model-name> --input datasets/finetune/val.jsonl --max-examples 50
+```
+
+The evaluator reports exact match accuracy, action accuracy, coordinate accuracy, and invalid JSON count.
+
+### Test The Tooling
+
+```bash
+venv/bin/python3 -m pytest
+```
 
 Example compact board:
 

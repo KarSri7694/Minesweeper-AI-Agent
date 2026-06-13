@@ -859,9 +859,10 @@ def main():
     parser.add_argument("--cols", type=int, default=15, help="Horizontal geometric constraint")
     parser.add_argument("--mines", type=float, default=0.15, help="Mine density ratio in [0, 1), e.g. 0.15 for 15% of cells")
     parser.add_argument("--games", type=int, default=1000, help="Iteration limit for episode sequences")
-    parser.add_argument("--output", type=str, default="./dataset", help="Target output structural directory")
+    parser.add_argument("--output", type=str, default="./datasets/generated", help="Target output structural directory")
     parser.add_argument("--filename", type=str, default="minesweeper_dataset.jsonl", help="Base filename for output sequences")
     parser.add_argument("--seed", type=int, default=None, help="Global stochastic entropy lock")
+    parser.add_argument("--diagnostics", action="store_true", help="Run solver diagnostics after dataset generation")
 
     # Internal bypass for notebook/module environments without stripping strict logic.
     if 'ipykernel' in sys.modules or len(sys.argv) == 1:
@@ -926,6 +927,7 @@ def main():
     print(f"Average Action Cycles/Episode:  {total_steps / args.games:.2f}")
     print(f"Algorithmic Deterministic Mass: {(total_det / total_moves) * 100:.2f}%")
     print(f"Stochastic Uncertainty Yield:   {(total_prob / total_moves) * 100:.2f}%")
+    return args
 
 
 def demonstrate_system():
@@ -985,8 +987,7 @@ def demonstrate_system():
             print(f"\nMinimum Risk Actuation Index -> Vector {best_coord} (Calculated Deviation: {probs[best_coord]:.4f})")
 
     print("\nExecuting Subsystem Stress Test (100 Successive Validations)...")
-    os.makedirs("./diagnostic_dataset", exist_ok=True)
-    generator = DatasetGenerator(9, 9, 10, "./diagnostic_dataset")
+    generator = DatasetGenerator(9, 9, 10, "")
     wins = 0
     total_steps, total_det, total_prob = 0, 0, 0
     for i in range(100):
@@ -1004,5 +1005,6 @@ def demonstrate_system():
 
 
 if __name__ == "__main__":
-    main()
-    demonstrate_system()
+    parsed_args = main()
+    if parsed_args.diagnostics:
+        demonstrate_system()
