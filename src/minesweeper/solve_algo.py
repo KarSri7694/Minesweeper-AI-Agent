@@ -857,7 +857,7 @@ def main():
     parser = argparse.ArgumentParser(description="Computational Minesweeper RL Matrix Generator")
     parser.add_argument("--rows", type=int, default=15, help="Vertical geometric constraint")
     parser.add_argument("--cols", type=int, default=15, help="Horizontal geometric constraint")
-    parser.add_argument("--mines", type=int, default=35, help="Latent variable volume")
+    parser.add_argument("--mines", type=float, default=0.15, help="Mine density ratio in [0, 1), e.g. 0.15 for 15% of cells")
     parser.add_argument("--games", type=int, default=1000, help="Iteration limit for episode sequences")
     parser.add_argument("--output", type=str, default="./dataset", help="Target output structural directory")
     parser.add_argument("--filename", type=str, default="minesweeper_dataset.jsonl", help="Base filename for output sequences")
@@ -873,18 +873,27 @@ def main():
         random.seed(args.seed)
         np.random.seed(args.seed)
 
+    if not 0.0 <= args.mines < 1.0:
+        parser.error("--mines must be a ratio in the range [0, 1). Example: --mines 0.15")
+
+    total_cells = args.rows * args.cols
+    num_mines = int(total_cells * args.mines)
+
     os.makedirs(args.output, exist_ok=True)
     transitions_path = os.path.join(args.output, args.filename or "minesweeper_dataset.jsonl")
     summaries_path = os.path.join(args.output, "games_summary.jsonl")
 
-    generator = DatasetGenerator(args.rows, args.cols, args.mines, args.output)
+    generator = DatasetGenerator(args.rows, args.cols, num_mines, args.output)
 
     wins = 0
     total_steps = 0
     total_det = 0
     total_prob = 0
 
-    print(f"Executing Dataset Synthesis -> Games: {args.games} | Geometry: {args.rows}x{args.cols} | Target Mines: {args.mines}")
+    print(
+        f"Executing Dataset Synthesis -> Games: {args.games} | Geometry: {args.rows}x{args.cols} "
+        f"| Mine Ratio: {args.mines:.2%} | Target Mines: {num_mines}"
+    )
 
     with open(transitions_path, 'w') as f_trans, open(summaries_path, 'w') as f_sum:
         for i in range(args.games):
