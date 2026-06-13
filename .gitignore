@@ -1,5 +1,5 @@
 venv/
-datasets/
+
 *.jsonl
 .pytest_cache/
 diagnostic_dataset/

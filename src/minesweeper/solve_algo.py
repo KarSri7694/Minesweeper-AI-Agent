@@ -160,24 +160,38 @@ class Board:
             self.generate_mines(r, c)
             self.first_click = False
 
-        revealed_before = np.count_nonzero(self.state == REVEALED)
-        self.state[r, c] = REVEALED
-
         if self.grid[r, c] == MINE:
+            self.state[r, c] = REVEALED
             self.game_over = True
             self.end_reason = "revealed_mine"
             return False
 
-        if self.grid[r, c] == 0:
-            for nr, nc in self.get_neighbors(r, c):
-                if self.state[nr, nc] == HIDDEN:
-                    self.reveal(nr, nc)
-
-        revealed_after = np.count_nonzero(self.state == REVEALED)
-        self.last_score_delta = revealed_after - revealed_before
+        self.last_score_delta = self._reveal_safe_region(r, c)
         self.score += self.last_score_delta
         self._check_win_condition()
         return True
+
+    def _reveal_safe_region(self, r: int, c: int) -> int:
+        """Reveals a safe cell and any connected zero-value region once."""
+        revealed_count = 0
+        stack = [(r, c)]
+
+        while stack:
+            current_r, current_c = stack.pop()
+            if self.state[current_r, current_c] != HIDDEN:
+                continue
+            if self.grid[current_r, current_c] == MINE:
+                continue
+
+            self.state[current_r, current_c] = REVEALED
+            revealed_count += 1
+
+            if self.grid[current_r, current_c] == 0:
+                for nr, nc in self.get_neighbors(current_r, current_c):
+                    if self.state[nr, nc] == HIDDEN:
+                        stack.append((nr, nc))
+
+        return revealed_count
 
     def flag(self, r: int, c: int) -> None:
         """
@@ -411,7 +425,8 @@ class Solver:
         new_constraints = set(constraints)
         progress = True
         iteration = 0
-        while progress and iteration < MAX_REDUCTION_ITERS:
+        hit_constraint_limit = False
+        while progress and iteration < MAX_REDUCTION_ITERS and not hit_constraint_limit:
             progress = False
             iteration += 1
             current_constraints = list(new_constraints)
@@ -440,9 +455,9 @@ class Solver:
 
                         # Stop adding if constraint set has grown too large
                         if len(new_constraints) >= MAX_CONSTRAINTS:
-                            progress = False
+                            hit_constraint_limit = True
                             break
-                if not progress:
+                if hit_constraint_limit:
                     break
 
         # Flag indicating the limits of deterministic linear reduction have been reached
