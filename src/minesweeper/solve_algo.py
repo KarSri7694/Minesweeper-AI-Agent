@@ -15,6 +15,18 @@ FLAGGED = 2
 MINE = -1
 
 
+def to_jsonable(value):
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {key: to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_jsonable(item) for item in value]
+    return value
+
+
 class Board:
     """
     Encapsulates the two-dimensional Minesweeper environment state, managing lattice
@@ -44,6 +56,9 @@ class Board:
         self.game_over = False
         self.is_won = False
         self.first_click = True
+        self.score = 0
+        self.end_reason: Optional[str] = None
+        self.last_score_delta = 0
 
     @classmethod
     def from_config(cls, grid: np.ndarray, mines_positions: Set[Tuple[int, int]]) -> 'Board':
@@ -69,18 +84,15 @@ class Board:
     def generate_mines(self, safe_r: int, safe_c: int) -> None:
         """
         Stochastically populates latent mines across the lattice structure.
-        Ensures the initial interaction coordinate and its immediate Moore neighborhood
-        remain completely devoid of mines to guarantee initial puzzle progression.
+        Ensures the initial interaction coordinate itself remains devoid of mines,
+        matching the current game rules.
 
         Args:
             safe_r (int): The row coordinate of the initial safe constraint.
             safe_c (int): The column coordinate of the initial safe constraint.
         """
-        safe_zone = set(self.get_neighbors(safe_r, safe_c))
-        safe_zone.add((safe_r, safe_c))
-
         all_positions = [(r, c) for r in range(self.rows) for c in range(self.cols)]
-        valid_positions = [p for p in all_positions if p not in safe_zone]
+        valid_positions = [p for p in all_positions if p != (safe_r, safe_c)]
 
         # Standard stochastic sampling for mine distribution
         mine_positions = random.sample(valid_positions, self.num_mines)
@@ -136,6 +148,11 @@ class Board:
         Returns:
             bool: False if the action precipitates a catastrophic mine detonation; True otherwise.
         """
+        self.last_score_delta = 0
+
+        if self.state[r, c] == FLAGGED:
+            return True
+
         if self.state[r, c] != HIDDEN or self.game_over:
             return True
 
@@ -143,10 +160,12 @@ class Board:
             self.generate_mines(r, c)
             self.first_click = False
 
+        revealed_before = np.count_nonzero(self.state == REVEALED)
         self.state[r, c] = REVEALED
 
         if self.grid[r, c] == MINE:
             self.game_over = True
+            self.end_reason = "revealed_mine"
             return False
 
         if self.grid[r, c] == 0:
@@ -154,6 +173,9 @@ class Board:
                 if self.state[nr, nc] == HIDDEN:
                     self.reveal(nr, nc)
 
+        revealed_after = np.count_nonzero(self.state == REVEALED)
+        self.last_score_delta = revealed_after - revealed_before
+        self.score += self.last_score_delta
         self._check_win_condition()
         return True
 
@@ -162,8 +184,18 @@ class Board:
         Toggles an informational flag constraint on the specified coordinate.
         Flags are utilized by the solver logic to track known mine distributions.
         """
+        self.last_score_delta = 0
+
+        if self.game_over:
+            return
+
         if self.state[r, c] == HIDDEN:
             self.state[r, c] = FLAGGED
+            if self.grid[r, c] == MINE:
+                self.last_score_delta = 2
+            else:
+                self.last_score_delta = -2
+            self.score += self.last_score_delta
         elif self.state[r, c] == FLAGGED:
             self.state[r, c] = HIDDEN
         self._check_win_condition()
@@ -173,10 +205,25 @@ class Board:
         Evaluates the global state tensor to determine if the terminal victory
         condition has been satisfied (all non-mine cells are formally revealed).
         """
-        hidden_or_flagged = np.count_nonzero(self.state != REVEALED)
-        if hidden_or_flagged == self.num_mines:
+        all_safe_revealed = True
+        all_mines_flagged = True
+        no_false_flags = True
+
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if self.grid[r, c] == MINE and self.state[r, c] != FLAGGED:
+                    all_mines_flagged = False
+                if self.grid[r, c] != MINE and self.state[r, c] != REVEALED:
+                    all_safe_revealed = False
+                if self.grid[r, c] != MINE and self.state[r, c] == FLAGGED:
+                    no_false_flags = False
+
+        if all_safe_revealed and all_mines_flagged and no_false_flags:
             self.is_won = True
             self.game_over = True
+            self.end_reason = "all_mines_flagged"
+            self.last_score_delta += 50
+            self.score += 50
 
     def is_solved(self) -> bool:
         """Returns the terminal Boolean victory status of the cellular environment."""
@@ -194,7 +241,85 @@ class Board:
         new_board.game_over = self.game_over
         new_board.is_won = self.is_won
         new_board.first_click = self.first_click
+        new_board.score = self.score
+        new_board.end_reason = self.end_reason
+        new_board.last_score_delta = self.last_score_delta
         return new_board
+
+    def visible_state(self) -> Dict:
+        board = []
+        for r in range(self.rows):
+            row = []
+            for c in range(self.cols):
+                row.append(self._serialize_tile(r, c))
+            board.append(row)
+        return {
+            "status": "won" if self.is_won else "lost" if self.game_over else "in_progress",
+            "width": self.cols,
+            "height": self.rows,
+            "mine_count": self.num_mines,
+            "flagged_count": int(np.count_nonzero(self.state == FLAGGED)),
+            "score": self.score,
+            "end_reason": self.end_reason,
+            "board": board,
+        }
+
+    def compact_state(self) -> Dict:
+        board = []
+        for r in range(self.rows):
+            row = []
+            for c in range(self.cols):
+                row.append(self._compact_tile_value(r, c))
+            board.append(row)
+        return {
+            "status": "won" if self.is_won else "lost" if self.game_over else "in_progress",
+            "width": self.cols,
+            "height": self.rows,
+            "mine_count": self.num_mines,
+            "flagged_count": int(np.count_nonzero(self.state == FLAGGED)),
+            "score": self.score,
+            "end_reason": self.end_reason,
+            "board": board,
+        }
+
+    def _serialize_tile(self, r: int, c: int) -> Dict:
+        if not self.game_over:
+            if self.state[r, c] == FLAGGED:
+                state = "flagged"
+            elif self.state[r, c] == REVEALED:
+                state = "revealed"
+            else:
+                state = "hidden"
+            return {
+                "x": c,
+                "y": r,
+                "state": state,
+                "adjacent_mines": int(self.grid[r, c]) if self.state[r, c] == REVEALED else None,
+            }
+
+        terminal_state = "revealed" if self.state[r, c] == REVEALED else "hidden"
+        if self.state[r, c] == FLAGGED:
+            terminal_state = "flagged"
+        if self.grid[r, c] == MINE and not self.is_won:
+            terminal_state = "mine"
+        return {
+            "x": c,
+            "y": r,
+            "state": terminal_state,
+            "adjacent_mines": None if self.grid[r, c] == MINE and self.state[r, c] != REVEALED else int(self.grid[r, c]),
+            "is_mine": bool(self.grid[r, c] == MINE),
+        }
+
+    def _compact_tile_value(self, r: int, c: int) -> str:
+        if self.state[r, c] == FLAGGED:
+            return "F"
+        if self.game_over and not self.is_won and self.grid[r, c] == MINE:
+            return "B"
+        if self.state[r, c] != REVEALED:
+            return "."
+        if self.grid[r, c] == 0:
+            return "_"
+        return str(int(self.grid[r, c]))
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +666,13 @@ class DatasetGenerator:
         self.num_mines = num_mines
         self.output_dir = output_dir
 
+    def serialize_action(self, action: str, row: int, col: int) -> Dict:
+        return {
+            "action": action,
+            "x": col,
+            "y": row,
+        }
+
     def generate_state_tensor(self, board: Board, probabilities: Dict[Tuple[int, int], float]) -> np.ndarray:
         """
         Projects the elementary state board arrays into computationally comprehensive,
@@ -606,12 +738,14 @@ class DatasetGenerator:
         cached_probs: Optional[Dict[Tuple[int, int], float]] = None
 
         while not board.game_over:
+            state_before_compact = board.compact_state()
             solver = Solver(board)
             move = solver.solve_step()
 
             action_r, action_c = -1, -1
             move_type = "unknown"
             action_prob = 0.0
+            api_action = "reveal"
 
             # Determine probabilities: only compute when needed
             if move is not None:
@@ -621,10 +755,12 @@ class DatasetGenerator:
                 if move.type == 'REVEAL':
                     action_r, action_c = move.cells[0]
                     action_prob = 0.0
+                    api_action = "reveal"
                     board.reveal(action_r, action_c)
                 elif move.type == 'FLAG':
                     action_r, action_c = move.cells[0]
                     action_prob = 1.0
+                    api_action = "flag"
                     board.flag(action_r, action_c)
                 deterministic_moves += 1
             else:
@@ -655,23 +791,11 @@ class DatasetGenerator:
                     break
                 action_r, action_c = best_cell
                 action_prob = probs.get((action_r, action_c), 0.5)
+                api_action = "reveal"
                 board.reveal(action_r, action_c)
                 probabilistic_moves += 1
 
-            state_tensor = self.generate_state_tensor(board, probs).tolist()
-
             step_count += 1
-
-            reward = -0.1  # Step-wise temporal decay
-            if board.game_over:
-                if board.is_won:
-                    reward += 10.0
-                else:
-                    reward -= 5.0
-            elif move_type == 'deterministic' and move.type == 'FLAG':
-                reward += 0.0
-            else:
-                reward += 1.0
 
             # Compute next-state probabilities only on probabilistic transitions.
             # For deterministic steps, channel 4 stays 0 — semantically correct because
@@ -686,23 +810,22 @@ class DatasetGenerator:
                 # Deterministic step: propagate cached probs, don't recompute
                 next_probs = {}
                 # cached_probs stays unchanged for next iteration
-            next_state_tensor = self.generate_state_tensor(board, next_probs).tolist()
-
-            flat_action = action_r * self.cols + action_c
+            state_after_compact = board.compact_state()
 
             transition = {
-                "state": state_tensor,
-                "action": flat_action,
-                "reward": reward,
-                "next_state": next_state_tensor,
-                "done": board.game_over,
+                "compact_board_before": state_before_compact["board"],
+                "compact_board_after": state_after_compact["board"],
+                "action": self.serialize_action(api_action, action_r, action_c),
+                "score": state_after_compact["score"],
                 "metadata": {
                     "game_id": game_id,
                     "step": step_count,
+                    "current_state": state_after_compact["status"],
                     "move_type": move_type,
                     "mine_probability_at_action": action_prob,
                     "board_size": [self.rows, self.cols],
-                    "mine_count": self.num_mines
+                    "mine_count": self.num_mines,
+                    "output_format": "compact",
                 }
             }
             transitions.append(transition)
@@ -715,7 +838,8 @@ class DatasetGenerator:
             "deterministic_moves": deterministic_moves,
             "probabilistic_moves": probabilistic_moves,
             "board_size": [self.rows, self.cols],
-            "mine_count": self.num_mines
+            "mine_count": self.num_mines,
+            "final_score": board.score,
         }
 
         return transitions, summary
@@ -736,6 +860,7 @@ def main():
     parser.add_argument("--mines", type=int, default=35, help="Latent variable volume")
     parser.add_argument("--games", type=int, default=1000, help="Iteration limit for episode sequences")
     parser.add_argument("--output", type=str, default="./dataset", help="Target output structural directory")
+    parser.add_argument("--filename", type=str, default="minesweeper_dataset.jsonl", help="Base filename for output sequences")
     parser.add_argument("--seed", type=int, default=None, help="Global stochastic entropy lock")
 
     # Internal bypass for notebook/module environments without stripping strict logic.
@@ -749,7 +874,7 @@ def main():
         np.random.seed(args.seed)
 
     os.makedirs(args.output, exist_ok=True)
-    transitions_path = os.path.join(args.output, "transitions.jsonl")
+    transitions_path = os.path.join(args.output, args.filename or "minesweeper_dataset.jsonl")
     summaries_path = os.path.join(args.output, "games_summary.jsonl")
 
     generator = DatasetGenerator(args.rows, args.cols, args.mines, args.output)
@@ -766,8 +891,8 @@ def main():
             transitions, summary = generator.play_episode(i)
 
             for t in transitions:
-                f_trans.write(json.dumps(t) + "\n")
-            f_sum.write(json.dumps(summary) + "\n")
+                f_trans.write(json.dumps(to_jsonable(t)) + "\n")
+            f_sum.write(json.dumps(to_jsonable(summary)) + "\n")
 
             # Flush after every game so progress is always visible on disk
             # and not lost if the process is interrupted mid-run.
