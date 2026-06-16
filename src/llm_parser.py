@@ -3,13 +3,14 @@ import json
 from openai import AsyncOpenAI
 from pathlib import Path
 import asyncio
-
+import time
+import ast
 base_url = "http://localhost:8080/"
 api_url_v1 = base_url + "v1/"
 
 game_url = "http://localhost:8000/"
 
-MODEL_NAME = "Qwen-3.5-9B-Q4_K_M"
+MODEL_NAME = "Qwen-3-4B-Instruct-2507-Minesweeper-Agent"
 def get_system_prompt():
     parent_dir = Path(__file__).parent.parent
     system_prompt = parent_dir / "system_prompt.md"
@@ -31,7 +32,8 @@ def create_game():
     if response.status_code == 200:
         print("Game created successfully!")
         game_id = response.json().get("game_id")
-        print(f"Game ID: {game_id}")
+        print(f"Game ID: {game_id}, waiting 5 seconds")
+        time.sleep(5)
         return game_id
 
 def get_game_state(game_id):
@@ -97,7 +99,7 @@ async def _consume_stream(response):
     return assistant_text
 
 def parse_llm_response(response):
-    response_json = json.loads(response)
+    response_json = ast.literal_eval(response)
     action = response_json.get("action")
     x = response_json.get("x")
     y = response_json.get("y")
@@ -113,10 +115,11 @@ async def main():
         # print(f"Full LLM Response: {assistant_text}")
         
         try:
-            next_action = assistant_text.split("```json")[1].split("```")[0]
-            action, x, y = parse_llm_response(next_action)
-        except json.decoder.JSONDecodeError:
-            print("Failed to parse LLM response. Skipping turn.")
+            # next_action = assistant_text.split("```json")[1].split("```")[0]
+            # {'action': 'reveal', 'x': 8, 'y': 0}
+            action, x, y = parse_llm_response(assistant_text)
+        except json.decoder.JSONDecodeError as e:
+            print(f"Failed to parse LLM response. Skipping turn. Error: {e}")
             continue
         except IndexError:
             next_action = assistant_text.strip()

@@ -81,6 +81,102 @@ class GameEngine:
             for y in range(self.config.height)
         ]
 
+    def snapshot(self) -> dict:
+        """Return a full engine snapshot that can recreate the exact same game state."""
+        return {
+            "game_id": self.game_id,
+            "config": {
+                "width": self.config.width,
+                "height": self.config.height,
+                "mine_density": self.config.mine_density,
+            },
+            "score_rules": {
+                "safe_reveal": self.score_rules.safe_reveal,
+                "correct_flag": self.score_rules.correct_flag,
+                "wrong_flag": self.score_rules.wrong_flag,
+                "win_bonus": self.score_rules.win_bonus,
+            },
+            "status": self.status.value,
+            "score": self.score,
+            "move_count": self.move_count,
+            "end_reason": self.end_reason,
+            "mines_placed": self._mines_placed,
+            "rng_state": self.rng.getstate(),
+            "board": [
+                [
+                    {
+                        "x": tile.x,
+                        "y": tile.y,
+                        "is_mine": tile.is_mine,
+                        "adjacent_mines": tile.adjacent_mines,
+                        "is_revealed": tile.is_revealed,
+                        "is_flagged": tile.is_flagged,
+                        "flag_score_applied": tile.flag_score_applied,
+                    }
+                    for tile in row
+                ]
+                for row in self._board
+            ],
+        }
+
+    @classmethod
+    def from_snapshot(cls, snapshot: dict) -> GameEngine:
+        """Recreate a game engine from a snapshot produced by snapshot()."""
+        config_data = snapshot["config"]
+        score_rules_data = snapshot["score_rules"]
+        game = cls(
+            config=GameConfig(
+                width=config_data["width"],
+                height=config_data["height"],
+                mine_density=config_data["mine_density"],
+            ),
+            score_rules=ScoreRules(
+                safe_reveal=score_rules_data["safe_reveal"],
+                correct_flag=score_rules_data["correct_flag"],
+                wrong_flag=score_rules_data["wrong_flag"],
+                win_bonus=score_rules_data["win_bonus"],
+            ),
+            rng=random.Random(),
+            game_id=snapshot["game_id"],
+            status=GameStatus(snapshot["status"]),
+            score=snapshot["score"],
+            move_count=snapshot["move_count"],
+            end_reason=snapshot["end_reason"],
+        )
+        game.restore_snapshot(snapshot)
+        return game
+
+    def restore_snapshot(self, snapshot: dict) -> None:
+        """Mutate this engine to match a snapshot produced by snapshot()."""
+        config_data = snapshot["config"]
+        if (
+            self.config.width != config_data["width"]
+            or self.config.height != config_data["height"]
+            or self.config.mine_density != config_data["mine_density"]
+        ):
+            raise ValueError("Snapshot config does not match this game engine.")
+
+        self.game_id = snapshot["game_id"]
+        self.status = GameStatus(snapshot["status"])
+        self.score = snapshot["score"]
+        self.move_count = snapshot["move_count"]
+        self.end_reason = snapshot["end_reason"]
+        self._mines_placed = snapshot["mines_placed"]
+        self.rng.setstate(snapshot["rng_state"])
+
+        board_data = snapshot["board"]
+        if len(board_data) != self.config.height or any(len(row) != self.config.width for row in board_data):
+            raise ValueError("Snapshot board dimensions do not match this game engine.")
+
+        for y, row in enumerate(board_data):
+            for x, tile_data in enumerate(row):
+                tile = self._board[y][x]
+                tile.is_mine = tile_data["is_mine"]
+                tile.adjacent_mines = tile_data["adjacent_mines"]
+                tile.is_revealed = tile_data["is_revealed"]
+                tile.is_flagged = tile_data["is_flagged"]
+                tile.flag_score_applied = tile_data["flag_score_applied"]
+
     @property
     def mine_count(self) -> int:
         return self.config.mine_count
