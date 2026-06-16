@@ -15,10 +15,10 @@ class GameStatus(str, Enum):
 
 @dataclass(frozen=True)
 class ScoreRules:
-    safe_reveal: int = 1
-    correct_flag: int = 2
-    wrong_flag: int = -2
-    win_bonus: int = 50
+    safe_reveal: int = 2
+    correct_flag: int = 5
+    wrong_flag: int = -1
+    win_bonus: int = 20
 
 
 @dataclass(frozen=True)
@@ -334,6 +334,27 @@ class GameEngine:
             "board": board,
         }
 
+    def full_board_compact_state(self) -> dict:
+        """Return the entire board in compact form without mutating game state."""
+        if not self._mines_placed:
+            raise ValueError("Full board is unavailable until mines have been placed.")
+
+        board = []
+        for row in self._board:
+            board.append([self._full_compact_tile_value(tile) for tile in row])
+        return {
+            "game_id": self.game_id,
+            "status": self.status.value,
+            "width": self.config.width,
+            "height": self.config.height,
+            "mine_count": self.mine_count,
+            "flagged_count": self.flagged_count,
+            "score": self.score,
+            "move_count": self.move_count,
+            "end_reason": self.end_reason,
+            "board": board,
+        }
+
     def _serialize_tile(self, tile: Tile) -> dict:
         if self.status is GameStatus.IN_PROGRESS:
             if tile.is_flagged:
@@ -369,6 +390,13 @@ class GameEngine:
             return "B"
         if not tile.is_revealed:
             return "."
+        if tile.adjacent_mines == 0:
+            return "0"
+        return str(tile.adjacent_mines)
+
+    def _full_compact_tile_value(self, tile: Tile) -> str:
+        if tile.is_mine:
+            return "B"
         if tile.adjacent_mines == 0:
             return "0"
         return str(tile.adjacent_mines)
