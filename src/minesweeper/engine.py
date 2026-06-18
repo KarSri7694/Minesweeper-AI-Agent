@@ -137,6 +137,8 @@ class GameEngine:
 
     def flag(self, x: int, y: int) -> MoveResult:
         self._ensure_playable()
+        if not self._mines_placed:
+            raise ValueError("First move must be a reveal.")
         tile = self.get_tile(x, y)
         if tile.is_revealed:
             raise ValueError("Revealed tiles cannot be flagged.")
@@ -221,6 +223,98 @@ class GameEngine:
             "board": board,
         }
 
+    def snapshot(self) -> dict:
+        """Return a full restorable game snapshot for training/evaluation rollouts."""
+        return {
+            "config": {
+                "width": self.config.width,
+                "height": self.config.height,
+                "mine_density": self.config.mine_density,
+            },
+            "score_rules": {
+                "safe_reveal": self.score_rules.safe_reveal,
+                "correct_flag": self.score_rules.correct_flag,
+                "wrong_flag": self.score_rules.wrong_flag,
+                "win_bonus": self.score_rules.win_bonus,
+            },
+            "rng_state": self.rng.getstate(),
+            "game_id": self.game_id,
+            "status": self.status.value,
+            "score": self.score,
+            "move_count": self.move_count,
+            "end_reason": self.end_reason,
+            "mines_placed": self._mines_placed,
+            "board": [
+                [
+                    {
+                        "x": tile.x,
+                        "y": tile.y,
+                        "is_mine": tile.is_mine,
+                        "adjacent_mines": tile.adjacent_mines,
+                        "is_revealed": tile.is_revealed,
+                        "is_flagged": tile.is_flagged,
+                        "flag_score_applied": tile.flag_score_applied,
+                    }
+                    for tile in row
+                ]
+                for row in self._board
+            ],
+        }
+
+    @classmethod
+    def from_snapshot(cls, snapshot: dict) -> "GameEngine":
+        config_data = snapshot["config"]
+        score_rules_data = snapshot.get("score_rules", {})
+        rng = random.Random()
+        if "rng_state" in snapshot:
+            rng.setstate(cls._tupleify_random_state(snapshot["rng_state"]))
+
+        game = cls(
+            config=GameConfig(
+                width=int(config_data["width"]),
+                height=int(config_data["height"]),
+                mine_density=float(config_data.get("mine_density", 0.15)),
+            ),
+            score_rules=ScoreRules(
+                safe_reveal=int(score_rules_data.get("safe_reveal", ScoreRules.safe_reveal)),
+                correct_flag=int(score_rules_data.get("correct_flag", ScoreRules.correct_flag)),
+                wrong_flag=int(score_rules_data.get("wrong_flag", ScoreRules.wrong_flag)),
+                win_bonus=int(score_rules_data.get("win_bonus", ScoreRules.win_bonus)),
+            ),
+            rng=rng,
+            game_id=str(snapshot.get("game_id", uuid4())),
+        )
+        game.status = GameStatus(snapshot.get("status", GameStatus.IN_PROGRESS.value))
+        game.score = int(snapshot.get("score", 0))
+        game.move_count = int(snapshot.get("move_count", 0))
+        game.end_reason = snapshot.get("end_reason")
+        game._mines_placed = bool(snapshot.get("mines_placed", False))
+
+        board_data = snapshot.get("board")
+        if not isinstance(board_data, list) or len(board_data) != game.config.height:
+            raise ValueError("Snapshot board height does not match game config.")
+
+        for y, row_data in enumerate(board_data):
+            if not isinstance(row_data, list) or len(row_data) != game.config.width:
+                raise ValueError("Snapshot board width does not match game config.")
+            for x, tile_data in enumerate(row_data):
+                tile = game._board[y][x]
+                tile.x = int(tile_data.get("x", x))
+                tile.y = int(tile_data.get("y", y))
+                tile.is_mine = bool(tile_data.get("is_mine", False))
+                tile.adjacent_mines = int(tile_data.get("adjacent_mines", 0))
+                tile.is_revealed = bool(tile_data.get("is_revealed", False))
+                tile.is_flagged = bool(tile_data.get("is_flagged", False))
+                tile.flag_score_applied = bool(tile_data.get("flag_score_applied", False))
+
+        return game
+
+    @staticmethod
+    def _tupleify_random_state(value):
+        if isinstance(value, list):
+            return tuple(GameEngine._tupleify_random_state(item) for item in value)
+        return value
+
     def compact_state(self) -> dict:
         board = []
         for row in self._board:
@@ -274,7 +368,7 @@ class GameEngine:
         if not tile.is_revealed:
             return "."
         if tile.adjacent_mines == 0:
-            return "0"
+            return "_"
         return str(tile.adjacent_mines)
 
 

@@ -44,6 +44,12 @@ Example move payload:
 ## State Interpretation
 
 You receive game state that includes:
+- `width`
+- `height`
+- `mine_count`
+- `flagged_count`
+- `score`
+- `move_count`
 - `board`
 
 Symbol meanings:
@@ -92,7 +98,10 @@ Interpretation of `adjacent_mines`:
 - Track local constraints around numbered tiles
 - Avoid random reveals unless no deterministic move exists
 - If forced to guess, choose the move with the lowest estimated mine risk
-- Output only required json
+- Output only required JSON
+- Do not include markdown fences, explanations, code, or comments
+- Do not output helper functions, pseudocode, or reasoning text
+- Never claim a move is guaranteed safe unless it follows directly from visible numbered-tile constraints
 
 ## Decision Policy
 
@@ -102,5 +111,15 @@ For a given board state:
 3. Identify deterministic safe reveals
 4. Identify deterministic mine flags
 5. If no deterministic move exists, estimate the least risky hidden tile
-6. Return exactly one move
+6. Return exactly one move as raw JSON only
 
+## Output Requirement
+
+- Return exactly one object
+- Use keys `action`, `x`, and `y`
+- Valid actions are `reveal` and `flag`
+- Stop immediately after the closing `}`
+
+Valid response format:
+
+{"action":"reveal","x":3,"y":4}
