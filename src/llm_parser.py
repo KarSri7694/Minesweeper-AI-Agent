@@ -45,7 +45,9 @@ def get_ollama_timeout_seconds():
 
 
 def get_ollama_num_predict():
-    return int(os.getenv("OLLAMA_NUM_PREDICT", "20"))
+    # A move normally needs far fewer tokens, but leave room for multi-digit
+    # coordinates and the closing brace so generation cannot truncate JSON.
+    return int(os.getenv("OLLAMA_NUM_PREDICT", "64"))
 
 
 def use_llm_from_start():
@@ -63,8 +65,20 @@ def get_move_system_prompt():
     return (
         "You are playing Minesweeper. Return exactly one legal move as minified JSON only. "
         "Never explain. Never echo the board. "
-        "Valid schema: {\"action\":\"reveal\"|\"flag\",\"row\":<int>,\"col\":<int>}."
+        "Valid schema: {\"action\":\"reveal\"|\"flag\",\"x\":<int>,\"y\":<int>}."
     )
+
+
+MOVE_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["action", "x", "y"],
+    "properties": {
+        "action": {"type": "string", "enum": ["reveal", "flag"]},
+        "x": {"type": "integer"},
+        "y": {"type": "integer"},
+    },
+}
     
 def create_game():
     json_data = {
@@ -167,6 +181,9 @@ async def get_llm_response(llm, system_prompt, user_prompt):
                 "prompt": user_prompt,
                 "stream": True,
                 "think": False,
+                # Ollama constrains decoding to this schema. Prompting alone
+                # cannot reliably prevent prose, Markdown, or truncated JSON.
+                "format": MOVE_JSON_SCHEMA,
                 "options": {
                     "num_predict": get_ollama_num_predict(),
                 },
@@ -195,7 +212,7 @@ async def get_llm_response(llm, system_prompt, user_prompt):
             try:
                 parsed = _extract_json_object(candidate)
                 if _is_move_payload(parsed):
-                    return candidate
+                    return json.dumps(parsed, separators=(",", ":"))
             except json.JSONDecodeError:
                 pass
 
@@ -206,7 +223,7 @@ async def get_llm_response(llm, system_prompt, user_prompt):
     try:
         parsed = _extract_json_object(final_text)
         if _is_move_payload(parsed):
-            return final_text
+            return json.dumps(parsed, separators=(",", ":"))
     except json.JSONDecodeError:
         pass
     return final_text
@@ -555,13 +572,13 @@ def build_probability_tiebreak_prompt(game_state, candidates):
     visible_state = {
         "board": game_state.get("board"),
         "candidate_reveals": [
-            {"row": y, "col": x, "estimated_mine_probability": probability}
+            {"x": x, "y": y, "estimated_mine_probability": probability}
             for (x, y), probability in candidates
         ],
     }
     return (
         "Choose exactly one reveal from candidate_reveals. "
-        "Return only minified JSON using row and col.\n"
+        "Return only minified JSON using action, x, and y.\n"
         f"{json.dumps(visible_state)}"
     )
 

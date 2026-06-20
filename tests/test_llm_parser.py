@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from llm_parser import connect_to_llm, create_game, deterministic_move, get_game_state, get_ollama_num_predict, get_ollama_base_url, make_move, parse_llm_response, probability_candidates, probability_move, use_llm_from_start, validate_move
+from llm_parser import MOVE_JSON_SCHEMA, connect_to_llm, create_game, deterministic_move, get_game_state, get_move_system_prompt, get_ollama_num_predict, get_ollama_base_url, make_move, parse_llm_response, probability_candidates, probability_move, use_llm_from_start, validate_move
 from minesweeper.engine import GameEngine
 
 
@@ -21,10 +21,16 @@ class LlmParserTests(unittest.TestCase):
 
     def test_get_ollama_num_predict_defaults_and_can_be_overridden(self) -> None:
         with patch.dict("os.environ", {}, clear=False):
-            self.assertEqual(get_ollama_num_predict(), 20)
+            self.assertEqual(get_ollama_num_predict(), 64)
 
         with patch.dict("os.environ", {"OLLAMA_NUM_PREDICT": "12"}, clear=False):
             self.assertEqual(get_ollama_num_predict(), 12)
+
+    def test_move_schema_and_prompt_use_x_y_coordinates(self) -> None:
+        self.assertEqual(MOVE_JSON_SCHEMA["required"], ["action", "x", "y"])
+        self.assertIn('"x"', get_move_system_prompt())
+        self.assertIn('"y"', get_move_system_prompt())
+        self.assertNotIn('"row"', get_move_system_prompt())
 
     def test_connect_to_llm_prefers_env_vars_for_remote_host_and_model(self) -> None:
         with patch.dict(
