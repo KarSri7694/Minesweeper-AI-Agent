@@ -43,7 +43,7 @@ def _is_frontier_move(game: GameEngine, x: int, y: int) -> bool:
     return any(neighbor.is_revealed and neighbor.adjacent_mines > 0 for neighbor in game.neighbors(x, y))
 
 
-def _clip_reward(value: float) -> float:
+def clip_reward(value: float) -> float:
     return max(MIN_FINAL_REWARD, min(MAX_FINAL_REWARD, value))
 
 
@@ -105,7 +105,7 @@ def calculate_reward_components(game: GameEngine, response: dict) -> dict[str, f
         "progress_bonus": progress_bonus,
         "terminal_bonus": terminal_bonus,
         "unclipped_total_reward": unclipped_total,
-        "total_reward": _clip_reward(unclipped_total),
+        "total_reward": clip_reward(unclipped_total),
     }
 
 
