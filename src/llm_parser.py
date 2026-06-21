@@ -5,6 +5,7 @@ from pathlib import Path
 import asyncio
 import os
 import random
+from dataclasses import dataclass, field
 
 import pygame
 
@@ -25,6 +26,37 @@ MAX_PROBABILITY_COMPONENT_SIZE = 18
 MODEL_GUI_ENABLED = os.getenv("MODEL_GUI", "0") == "1"
 MODEL_GUI_STEP_MS = int(os.getenv("MODEL_GUI_STEP_MS", "250"))
 DEBUG_RUN_ENABLED = os.getenv("DEBUG_RUN", "0") == "1"
+
+
+@dataclass
+class MoveGuard:
+    """Reject duplicate moves for an unchanged visible board.
+
+    This is deliberately keyed by the visible board rather than only by the
+    coordinate: returning to a coordinate may be valid after the board has
+    changed, but repeating an action without a state transition is a loop.
+    """
+
+    attempted_moves: set[tuple[str, tuple[tuple[str, ...], ...], str, int, int]] = field(
+        default_factory=set
+    )
+
+    def accept(self, move: dict | None, game_state: dict) -> bool:
+        if move is None:
+            return False
+        board = game_state.get("board") or []
+        board_key = tuple(tuple(str(cell) for cell in row) for row in board)
+        key = (
+            str(game_state.get("game_id", "")),
+            board_key,
+            str(move.get("action")),
+            int(move.get("x", -1)),
+            int(move.get("y", -1)),
+        )
+        if key in self.attempted_moves:
+            return False
+        self.attempted_moves.add(key)
+        return True
 
 
 def get_ollama_base_url():
@@ -731,6 +763,7 @@ async def main():
     gui = init_model_gui(game_id)
     render_model_gui(gui, game_id, "Model is starting.")
     llm = connect_to_llm()
+    move_guard = MoveGuard()
     while True:
         if use_llm_from_start():
             move = await choose_move_with_llm(llm, game_state)
@@ -801,6 +834,14 @@ async def main():
         if move is None:
             print("No legal moves available.")
             break
+
+        if not move_guard.accept(move, game_state):
+            print(f"Blocked repeated move on an unchanged board: {move}")
+            move = fallback_guess(game_state)
+            move_source = "Loop-avoidance fallback"
+            if move is None or not move_guard.accept(move, game_state):
+                print("No non-repeating legal moves available.")
+                break
 
         action = move["action"]
         x = move["x"]

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from llm_parser import MOVE_JSON_SCHEMA, connect_to_llm, create_game, deterministic_move, get_game_state, get_move_system_prompt, get_ollama_num_predict, get_ollama_base_url, make_move, parse_llm_response, probability_candidates, probability_move, use_llm_from_start, validate_move
+from llm_parser import MOVE_JSON_SCHEMA, MoveGuard, connect_to_llm, create_game, deterministic_move, get_game_state, get_move_system_prompt, get_ollama_num_predict, get_ollama_base_url, make_move, parse_llm_response, probability_candidates, probability_move, use_llm_from_start, validate_move
 from minesweeper.engine import GameEngine
 
 
@@ -179,6 +179,15 @@ class LlmParserTests(unittest.TestCase):
             validate_move({"action": "reveal", "row": 1, "col": 0}, game_state),
             {"action": "reveal", "x": 0, "y": 1, "row": 1, "col": 0},
         )
+
+    def test_move_guard_blocks_only_duplicate_moves_on_same_board(self) -> None:
+        guard = MoveGuard()
+        state = {"game_id": "test", "board": [[".", "1"]]}
+        move = {"action": "reveal", "x": 0, "y": 0}
+
+        self.assertTrue(guard.accept(move, state))
+        self.assertFalse(guard.accept(move, state))
+        self.assertTrue(guard.accept(move, {"game_id": "test", "board": [["_", "1"]]}))
 
 
 if __name__ == "__main__":
