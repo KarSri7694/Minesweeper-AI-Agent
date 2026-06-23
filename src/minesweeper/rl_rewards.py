@@ -7,13 +7,14 @@ ZERO_REVEAL_REWARD = 0.25
 CORRECT_FLAG_REWARD = 0.45
 WRONG_FLAG_PENALTY = -0.55
 MINE_REVEAL_PENALTY = -3.0
-WIN_REWARD = 1.0
+WIN_REWARD = 1.5
 CERTAINTY_BONUS = 0.25
 FRONTIER_PROGRESS_BONUS = 0.10
-FORCED_MOVE_MISSED_PENALTY = -0.25
-CONTRADICTION_PENALTY = -0.75
-MIN_FINAL_REWARD = -1.0
-MAX_FINAL_REWARD = 1.0
+INVALID_REVEAL_PENALTY = -0.5 #the model tries to reveal a tile that is already revealed
+INVALID_FLAG_PENALTY = -0.5 #the model tries to flag a tile that is already revealed
+INVALID_REPEAT_FLAG_PENALTY = -0.5 #the model tries to flag a tile that is already flagged
+MIN_FINAL_REWARD = -2.0
+MAX_FINAL_REWARD = 2.0
 
 
 def _find_forced_moves(game: GameEngine) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
@@ -47,6 +48,18 @@ def clip_reward(value: float) -> float:
     return max(MIN_FINAL_REWARD, min(MAX_FINAL_REWARD, value))
 
 
+def _invalid_move_reward(penalty: float) -> dict[str, float]:
+    clipped = clip_reward(penalty)
+    return {
+        "base_reward": penalty,
+        "logic_bonus": 0.0,
+        "progress_bonus": 0.0,
+        "terminal_bonus": 0.0,
+        "unclipped_total_reward": penalty,
+        "total_reward": clipped,
+    }
+
+
 def calculate_reward_components(game: GameEngine, response: dict) -> dict[str, float]:
     """Return GRPO reward shaping without changing gameplay scoring rules."""
     action = response["action"]
@@ -54,30 +67,23 @@ def calculate_reward_components(game: GameEngine, response: dict) -> dict[str, f
     y = response["y"]
     target_tile = game.get_tile(x, y)
 
-    if target_tile.is_revealed:
-        raise ValueError("Revealing an already revealed tile is penalized in GRPO reward shaping.")
+    if action == "reveal" and target_tile.is_revealed:
+        return _invalid_move_reward(INVALID_REVEAL_PENALTY)
+    if action == "flag" and target_tile.is_revealed:
+        return _invalid_move_reward(INVALID_FLAG_PENALTY)
     if action == "flag" and target_tile.is_flagged:
-        raise ValueError("Flagging an already flagged tile is penalized in GRPO reward shaping.")
+        return _invalid_move_reward(INVALID_REPEAT_FLAG_PENALTY)
 
     forced_safe, forced_mines = _find_forced_moves(game)
-    forced_moves_exist = bool(forced_safe or forced_mines)
     target = (x, y)
 
     logic_bonus = 0.0
     if action == "reveal":
         if target in forced_safe:
             logic_bonus += CERTAINTY_BONUS
-        elif target in forced_mines:
-            logic_bonus += CONTRADICTION_PENALTY
-        elif forced_moves_exist:
-            logic_bonus += FORCED_MOVE_MISSED_PENALTY
     else:
         if target in forced_mines:
             logic_bonus += CERTAINTY_BONUS
-        elif target in forced_safe:
-            logic_bonus += CONTRADICTION_PENALTY
-        elif forced_moves_exist:
-            logic_bonus += FORCED_MOVE_MISSED_PENALTY
 
     progress_bonus = FRONTIER_PROGRESS_BONUS if _is_frontier_move(game, x, y) else 0.0
 
