@@ -212,7 +212,7 @@ class GameEngine:
         if tile.is_flagged:
             raise ValueError("Flagged tiles cannot be revealed until unflagged.")
         if tile.is_revealed:
-            return MoveResult(0, [], "Tile already revealed.")
+            raise ValueError("Revealed tiles cannot be revealed again.")
         if not self._mines_placed:
             self._place_mines_safe_from(x, y)
 

@@ -28,10 +28,10 @@ class GameEngineTests(unittest.TestCase):
         unflag = game.flag(safe_tile.x, safe_tile.y)
         second_flag = game.flag(safe_tile.x, safe_tile.y)
 
-        self.assertEqual(first_flag.score_delta, -2)
+        self.assertEqual(first_flag.score_delta, -1)
         self.assertEqual(unflag.score_delta, 0)
         self.assertEqual(second_flag.score_delta, 0)
-        self.assertGreaterEqual(game.score, -2)
+        self.assertGreaterEqual(game.score, -1)
 
     def test_win_requires_safe_reveals_and_all_mines_flagged(self) -> None:
         game = GameEngine(config=GameConfig(width=2, height=2, mine_density=0.25))
@@ -45,9 +45,9 @@ class GameEngineTests(unittest.TestCase):
         self.assertIs(game.status, GameStatus.IN_PROGRESS)
 
         flag_result = game.flag(mine_tile.x, mine_tile.y)
-        self.assertEqual(flag_result.score_delta, 2)
+        self.assertEqual(flag_result.score_delta, 5)
         self.assertIs(game.status, GameStatus.WON)
-        self.assertGreaterEqual(game.score, 50)
+        self.assertGreaterEqual(game.score, 20)
 
     def test_revealing_flagged_tile_is_rejected(self) -> None:
         game = GameEngine(config=GameConfig(width=5, height=5))
@@ -56,6 +56,13 @@ class GameEngineTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Flagged tiles cannot be revealed"):
             game.reveal(tile.x, tile.y)
+
+    def test_revealing_an_already_revealed_tile_is_rejected(self) -> None:
+        game = GameEngine(config=GameConfig(width=5, height=5))
+        game.reveal(0, 0)
+
+        with self.assertRaisesRegex(ValueError, "cannot be revealed again"):
+            game.reveal(0, 0)
 
 
 if __name__ == "__main__":

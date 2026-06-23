@@ -50,7 +50,7 @@ Symbol meanings:
 
 - `.` means the tile is unrevealed
 - `F` means the tile is flagged
-- `_` means the tile is revealed and has zero adjacent mines
+- `0` means the tile is revealed and has zero adjacent mines
 - `"1"` to `"8"` mean the tile is revealed and the value is the number of adjacent mines
 - `B` means a bomb tile visible after the game is lost
 
@@ -58,9 +58,9 @@ Example:
 
 ```text
 . . . 1
-_ F 1 .
-_ 2 3 _
-_ _ _ _
+0 F 1 .
+0 2 3 0
+0 0 0 0
 ```
 
 Interpret the array using zero-based coordinates:
@@ -103,4 +103,3 @@ For a given board state:
 4. Identify deterministic mine flags
 5. If no deterministic move exists, estimate the least risky hidden tile
 6. Return exactly one move
-
