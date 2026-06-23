@@ -55,6 +55,15 @@ class ApiTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.status_code, 400)
 
+    def test_repeated_reveal_returns_400(self) -> None:
+        created = self.create_game_endpoint(CreateGameRequest(width=5, height=5, seed=7))
+        game_id = created["game_id"]
+        self.move_endpoint(game_id, MoveRequest(action="reveal", x=0, y=0))
+
+        with self.assertRaises(HTTPException) as context:
+            self.move_endpoint(game_id, MoveRequest(action="reveal", x=0, y=0))
+        self.assertEqual(context.exception.status_code, 400)
+
     def test_compact_state_uses_symbol_board(self) -> None:
         created = self.create_game_endpoint(
             CreateGameRequest(width=4, height=4, seed=7, output_format="compact")
@@ -69,7 +78,7 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(moved["output_format"], "compact")
         self.assertTrue(
-            any(cell in {"_", "1", "2", "3", "4", "5", "6", "7", "8"} for row in moved["board"] for cell in row)
+            any(cell in {"0", "1", "2", "3", "4", "5", "6", "7", "8"} for row in moved["board"] for cell in row)
         )
 
         compact_state = self.get_game_state_endpoint(
