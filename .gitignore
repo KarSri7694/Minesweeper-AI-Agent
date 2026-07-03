@@ -1,6 +1,11 @@
-venv/
+.venv/
+dataset/
 datasets/
 __pycache__/
 *.py[codz]
 *$py.class
 minesweeper/dataset/transitions.jsonl
+notebook/unsloth_compiled_cache
+notebook/Minesweeper_agent_Qwen3_0.6B
+outputs/
+wandb/
