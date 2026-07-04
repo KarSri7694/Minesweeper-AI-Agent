@@ -1,43 +1,60 @@
 from __future__ import annotations
 
+from typing import Any
+
 from .engine import GameEngine
+from .solve_algo import Board, FLAGGED, HIDDEN, REVEALED, ProbabilisticSolver, ranked_solver_actions
 
 NUMBER_REVEAL_REWARD = 0.35
-ZERO_REVEAL_REWARD = 0.25
-CORRECT_FLAG_REWARD = 0.45
-WRONG_FLAG_PENALTY = -0.55
+ZERO_REVEAL_REWARD = 0.35
+CORRECT_FLAG_REWARD = 0.8
+WRONG_FLAG_PENALTY = -0.4
 MINE_REVEAL_PENALTY = -3.0
 WIN_REWARD = 1.5
-CERTAINTY_BONUS = 0.25
+DETERMINISTIC_MATCH_BONUS = 0.60
+MISSED_DETERMINISTIC_PENALTY = -0.15
+MAX_GUESS_QUALITY_BONUS = 0.20
+MIN_GUESS_QUALITY_BONUS = -0.20
+PROBABILISTIC_FLAG_PENALTY = -0.10
 FRONTIER_PROGRESS_BONUS = 0.10
 INVALID_REVEAL_PENALTY = -1.5 #the model tries to reveal a tile that is already revealed
-INVALID_FLAG_PENALTY = -0.5 #the model tries to flag a tile that is already revealed
-INVALID_REPEAT_FLAG_PENALTY = -0.5 #the model tries to flag a tile that is already flagged
-MIN_FINAL_REWARD = -2.0
-MAX_FINAL_REWARD = 2.0
+INVALID_FLAG_PENALTY = -1.5 #the model tries to flag a tile that is already revealed
+INVALID_REPEAT_FLAG_PENALTY = -1.5 #the model tries to flag a tile that is already flagged
+MIN_FINAL_REWARD = -7.0
+MAX_FINAL_REWARD = 7.0
+
+RANK_BONUSES = {
+    1: 0.10,
+    2: 0.05,
+    3: 0.02,
+}
 
 
-def _find_forced_moves(game: GameEngine) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
-    forced_safe: set[tuple[int, int]] = set()
-    forced_mines: set[tuple[int, int]] = set()
+def _game_to_solver_board(game: GameEngine) -> Board:
+    board = Board(game.config.height, game.config.width, game.mine_count)
+    board.first_click = False
+    board.game_over = game.status.value != "in_progress"
+    board.is_won = game.status.value == "won"
+    board.score = game.score
+    board.end_reason = game.end_reason
 
     for tile in game.iter_tiles():
-        if not tile.is_revealed or tile.adjacent_mines <= 0:
-            continue
+        board.grid[tile.y, tile.x] = -1 if tile.is_mine else tile.adjacent_mines
+        if tile.is_revealed:
+            board.state[tile.y, tile.x] = REVEALED
+        elif tile.is_flagged:
+            board.state[tile.y, tile.x] = FLAGGED
+        else:
+            board.state[tile.y, tile.x] = HIDDEN
 
-        neighbors = game.neighbors(tile.x, tile.y)
-        hidden_neighbors = [neighbor for neighbor in neighbors if not neighbor.is_revealed and not neighbor.is_flagged]
-        flagged_neighbors = sum(neighbor.is_flagged for neighbor in neighbors)
-        remaining_mines = tile.adjacent_mines - flagged_neighbors
+    return board
 
-        if not hidden_neighbors:
-            continue
-        if remaining_mines == 0:
-            forced_safe.update((neighbor.x, neighbor.y) for neighbor in hidden_neighbors)
-        elif remaining_mines == len(hidden_neighbors):
-            forced_mines.update((neighbor.x, neighbor.y) for neighbor in hidden_neighbors)
 
-    return forced_safe, forced_mines
+def _guess_quality_bonus(probability: float) -> float:
+    return max(
+        MIN_GUESS_QUALITY_BONUS,
+        min(MAX_GUESS_QUALITY_BONUS, MAX_GUESS_QUALITY_BONUS - (0.40 * probability)),
+    )
 
 
 def _is_frontier_move(game: GameEngine, x: int, y: int) -> bool:
@@ -60,7 +77,59 @@ def _invalid_move_reward(penalty: float) -> dict[str, float]:
     }
 
 
-def calculate_reward_components(game: GameEngine, response: dict) -> dict[str, float]:
+def _evaluate_logic_signal(game: GameEngine, action: str, x: int, y: int) -> dict[str, Any]:
+    solver_board = _game_to_solver_board(game)
+    ranked_candidates = ranked_solver_actions(solver_board)
+    deterministic_candidates = [candidate for candidate in ranked_candidates if candidate.move_type == "deterministic"]
+    target = (action, y, x)
+
+    if deterministic_candidates:
+        deterministic_targets = {
+            (candidate.action, candidate.row, candidate.col)
+            for candidate in deterministic_candidates
+        }
+        matched = target in deterministic_targets
+        return {
+            "logic_bonus": DETERMINISTIC_MATCH_BONUS if matched else MISSED_DETERMINISTIC_PENALTY,
+            "logic_state": "deterministic",
+            "logic_match": "matched" if matched else "missed_deterministic",
+            "mine_probability": 0.0 if matched and action == "reveal" else (1.0 if matched and action == "flag" else None),
+            "candidate_rank": None,
+            "deterministic_candidate_count": len(deterministic_candidates),
+        }
+
+    probabilities = ProbabilisticSolver(solver_board).calculate_probabilities()
+    mine_probability = float(probabilities.get((y, x), 1.0))
+
+    if action == "flag":
+        return {
+            "logic_bonus": PROBABILISTIC_FLAG_PENALTY,
+            "logic_state": "probabilistic",
+            "logic_match": "probabilistic_flag",
+            "mine_probability": mine_probability,
+            "candidate_rank": None,
+            "deterministic_candidate_count": 0,
+        }
+
+    candidate_rank = None
+    rank_bonus = 0.0
+    for rank, candidate in enumerate(ranked_candidates, start=1):
+        if candidate.action == action and candidate.row == y and candidate.col == x:
+            candidate_rank = rank
+            rank_bonus = RANK_BONUSES.get(rank, 0.0)
+            break
+
+    return {
+        "logic_bonus": _guess_quality_bonus(mine_probability) + rank_bonus,
+        "logic_state": "probabilistic",
+        "logic_match": "ranked_guess" if candidate_rank is not None else "unranked_guess",
+        "mine_probability": mine_probability,
+        "candidate_rank": candidate_rank,
+        "deterministic_candidate_count": 0,
+    }
+
+
+def calculate_reward_components(game: GameEngine, response: dict) -> dict[str, Any]:
     """Return GRPO reward shaping without changing gameplay scoring rules."""
     action = response["action"]
     x = response["x"]
@@ -74,16 +143,8 @@ def calculate_reward_components(game: GameEngine, response: dict) -> dict[str, f
     if action == "flag" and target_tile.is_flagged:
         return _invalid_move_reward(INVALID_REPEAT_FLAG_PENALTY)
 
-    forced_safe, forced_mines = _find_forced_moves(game)
-    target = (x, y)
-
-    logic_bonus = 0.0
-    if action == "reveal":
-        if target in forced_safe:
-            logic_bonus += CERTAINTY_BONUS
-    else:
-        if target in forced_mines:
-            logic_bonus += CERTAINTY_BONUS
+    logic_evaluation = _evaluate_logic_signal(game, action, x, y)
+    logic_bonus = float(logic_evaluation["logic_bonus"])
 
     progress_bonus = FRONTIER_PROGRESS_BONUS if _is_frontier_move(game, x, y) else 0.0
 
@@ -108,6 +169,11 @@ def calculate_reward_components(game: GameEngine, response: dict) -> dict[str, f
     return {
         "base_reward": base_reward,
         "logic_bonus": logic_bonus,
+        "logic_state": logic_evaluation["logic_state"],
+        "logic_match": logic_evaluation["logic_match"],
+        "mine_probability": logic_evaluation["mine_probability"],
+        "candidate_rank": logic_evaluation["candidate_rank"],
+        "deterministic_candidate_count": logic_evaluation["deterministic_candidate_count"],
         "progress_bonus": progress_bonus,
         "terminal_bonus": terminal_bonus,
         "unclipped_total_reward": unclipped_total,

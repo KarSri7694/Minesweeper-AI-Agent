@@ -336,6 +336,18 @@ class SolverMove:
     cells: List[Tuple[int, int]]
 
 
+@dataclass(frozen=True)
+class CandidateAction:
+    """
+    Single supervised label candidate derived from the current board state.
+    """
+    action: str
+    row: int
+    col: int
+    move_type: str
+    mine_probability: float
+
+
 @dataclass
 class Constraint:
     """
@@ -650,6 +662,67 @@ class ProbabilisticSolver:
         return best_cell
 
 
+def _rank_probabilistic_cells(
+    board: Board,
+    probabilities: Dict[Tuple[int, int], float],
+) -> List[Tuple[Tuple[int, int], float]]:
+    center_r, center_c = board.rows / 2.0, board.cols / 2.0
+
+    def sort_key(item: Tuple[Tuple[int, int], float]) -> Tuple[float, float, int, int]:
+        (r, c), probability = item
+        dist = (r - center_r) ** 2 + (c - center_c) ** 2
+        return (probability, dist, r, c)
+
+    return sorted(probabilities.items(), key=sort_key)
+
+
+def ranked_solver_actions(board: Board, max_probabilistic_outputs: int = 3) -> List[CandidateAction]:
+    """
+    Returns ranked single-tile targets for the current state.
+    Deterministic states expand to all guaranteed moves; non-deterministic states
+    emit up to `max_probabilistic_outputs` lowest-risk reveals.
+    """
+    solver = Solver(board)
+    move = solver.solve_step()
+
+    if move is not None:
+        action = "reveal" if move.type == "REVEAL" else "flag"
+        mine_probability = 0.0 if action == "reveal" else 1.0
+        return [
+            CandidateAction(
+                action=action,
+                row=row,
+                col=col,
+                move_type="deterministic",
+                mine_probability=mine_probability,
+            )
+            for row, col in sorted(move.cells)
+        ]
+
+    probabilities = ProbabilisticSolver(board).calculate_probabilities()
+    if not probabilities:
+        return []
+
+    ranked_cells = _rank_probabilistic_cells(board, probabilities)[:max_probabilistic_outputs]
+    return [
+        CandidateAction(
+            action="reveal",
+            row=row,
+            col=col,
+            move_type="probabilistic",
+            mine_probability=probability,
+        )
+        for (row, col), probability in ranked_cells
+    ]
+
+
+def apply_candidate_action(board: Board, candidate: CandidateAction) -> None:
+    if candidate.action == "reveal":
+        board.reveal(candidate.row, candidate.col)
+    else:
+        board.flag(candidate.row, candidate.col)
+
+
 # ---------------------------------------------------------------------------
 # Part 4: Markov Decision Process and RL Dataset Orchestration
 # ---------------------------------------------------------------------------
@@ -719,10 +792,8 @@ class DatasetGenerator:
         definitive resolution or destruction. Accurately compiles comprehensive MDP
         transition dicts representing formal (State, Action, Reward, State_Prime).
 
-        Performance optimization: probability computation is deferred and cached.
-        For deterministic moves the expensive backtracking enumeration is skipped
-        entirely — probabilities are only computed when the solver is stuck and a
-        probabilistic guess is required.
+        Each board state may emit multiple supervised targets while the live
+        rollout advances using only the top-ranked action.
         """
         board = Board(self.rows, self.cols, self.num_mines)
         transitions: List[Dict] = []
@@ -734,101 +805,47 @@ class DatasetGenerator:
         deterministic_moves = 0
         probabilistic_moves = 0
 
-        # Cache: reuse next_state probs as current state probs on the following iteration
-        cached_probs: Optional[Dict[Tuple[int, int], float]] = None
-
         while not board.game_over:
             state_before_compact = board.compact_state()
-            solver = Solver(board)
-            move = solver.solve_step()
+            candidates = ranked_solver_actions(board)
+            if not candidates:
+                break
 
-            action_r, action_c = -1, -1
-            move_type = "unknown"
-            action_prob = 0.0
-            api_action = "reveal"
-
-            # Determine probabilities: only compute when needed
-            if move is not None:
-                # Deterministic move — use cached probs if available, else empty dict
-                probs = cached_probs if cached_probs is not None else {}
-                move_type = "deterministic"
-                if move.type == 'REVEAL':
-                    action_r, action_c = move.cells[0]
-                    action_prob = 0.0
-                    api_action = "reveal"
-                    board.reveal(action_r, action_c)
-                elif move.type == 'FLAG':
-                    action_r, action_c = move.cells[0]
-                    action_prob = 1.0
-                    api_action = "flag"
-                    board.flag(action_r, action_c)
+            if candidates[0].move_type == "deterministic":
                 deterministic_moves += 1
             else:
-                # Probabilistic move — must compute probabilities
-                move_type = "probabilistic"
-                prob_solver = ProbabilisticSolver(board)
-                probs = prob_solver.calculate_probabilities()
-
-                # Select best guess from the already-computed probabilities
-                if not probs:
-                    break
-                center_r, center_c = board.rows / 2.0, board.cols / 2.0
-                best_cell = None
-                min_prob = float('inf')
-                min_dist = float('inf')
-                for (r, c), p in probs.items():
-                    dist = (r - center_r)**2 + (c - center_c)**2
-                    if p < min_prob - 1e-6:
-                        min_prob = p
-                        min_dist = dist
-                        best_cell = (r, c)
-                    elif abs(p - min_prob) <= 1e-6:
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_cell = (r, c)
-
-                if best_cell is None:
-                    break
-                action_r, action_c = best_cell
-                action_prob = probs.get((action_r, action_c), 0.5)
-                api_action = "reveal"
-                board.reveal(action_r, action_c)
                 probabilistic_moves += 1
 
             step_count += 1
+            candidate_count = len(candidates)
 
-            # Compute next-state probabilities only on probabilistic transitions.
-            # For deterministic steps, channel 4 stays 0 — semantically correct because
-            # the solver has a guaranteed-safe action, so probability guidance is irrelevant.
-            if not board.game_over and move_type == "probabilistic":
-                next_probs = ProbabilisticSolver(board).calculate_probabilities()
-                cached_probs = next_probs
-            elif board.game_over:
-                next_probs = {}
-                cached_probs = None
-            else:
-                # Deterministic step: propagate cached probs, don't recompute
-                next_probs = {}
-                # cached_probs stays unchanged for next iteration
-            state_after_compact = board.compact_state()
+            for rank, candidate in enumerate(candidates, start=1):
+                candidate_board = board.clone()
+                apply_candidate_action(candidate_board, candidate)
+                state_after_compact = candidate_board.compact_state()
 
-            transition = {
-                "compact_board_before": state_before_compact["board"],
-                "compact_board_after": state_after_compact["board"],
-                "action": self.serialize_action(api_action, action_r, action_c),
-                "score": state_after_compact["score"],
-                "metadata": {
-                    "game_id": game_id,
-                    "step": step_count,
-                    "current_state": state_after_compact["status"],
-                    "move_type": move_type,
-                    "mine_probability_at_action": action_prob,
-                    "board_size": [self.rows, self.cols],
-                    "mine_count": self.num_mines,
-                    "output_format": "compact",
+                transition = {
+                    "compact_board_before": state_before_compact["board"],
+                    "compact_board_after": state_after_compact["board"],
+                    "action": self.serialize_action(candidate.action, candidate.row, candidate.col),
+                    "score": state_after_compact["score"],
+                    "metadata": {
+                        "game_id": game_id,
+                        "step": step_count,
+                        "current_state": state_after_compact["status"],
+                        "move_type": candidate.move_type,
+                        "mine_probability_at_action": candidate.mine_probability,
+                        "candidate_rank": rank,
+                        "candidate_count": candidate_count,
+                        "selection_policy": "all_deterministic_or_top3_lowest_risk",
+                        "board_size": [self.rows, self.cols],
+                        "mine_count": self.num_mines,
+                        "output_format": "compact",
+                    }
                 }
-            }
-            transitions.append(transition)
+                transitions.append(transition)
+
+            apply_candidate_action(board, candidates[0])
 
         result = "win" if board.is_won else "loss"
         summary = {
@@ -880,8 +897,13 @@ def main():
     num_mines = int(total_cells * args.mines)
 
     os.makedirs(args.output, exist_ok=True)
-    transitions_path = os.path.join(args.output, args.filename or "minesweeper_dataset.jsonl")
-    summaries_path = os.path.join(args.output, "games_summary.jsonl")
+    dataset_filename = args.filename or "minesweeper_dataset.jsonl"
+    dataset_stem, dataset_ext = os.path.splitext(dataset_filename)
+    if not dataset_ext:
+        dataset_ext = ".jsonl"
+    summary_filename = f"{dataset_stem}_summary{dataset_ext}"
+    transitions_path = os.path.join(args.output, dataset_filename)
+    summaries_path = os.path.join(args.output, summary_filename)
 
     generator = DatasetGenerator(args.rows, args.cols, num_mines, args.output)
 
@@ -1005,4 +1027,4 @@ def demonstrate_system():
 
 if __name__ == "__main__":
     main()
-    demonstrate_system()
+    # demonstrate_system()
