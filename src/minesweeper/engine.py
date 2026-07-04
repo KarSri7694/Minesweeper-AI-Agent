@@ -207,12 +207,12 @@ class GameEngine:
         return result
 
     def reveal(self, x: int, y: int) -> MoveResult:
-        self._ensure_playable()
         tile = self.get_tile(x, y)
-        if tile.is_flagged:
-            raise ValueError("Flagged tiles cannot be revealed until unflagged.")
         if tile.is_revealed:
             return MoveResult(0, [], "Tile already revealed.")
+        if tile.is_flagged:
+            return MoveResult(0, [], "Tile is flagged.")
+        self._ensure_playable()
         if not self._mines_placed:
             self._place_mines_safe_from(x, y)
 
