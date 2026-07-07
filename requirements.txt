@@ -1,3 +1,4 @@
 fastapi
 pygame
 uvicorn
+wandb
