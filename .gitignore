@@ -9,3 +9,6 @@ notebook/unsloth_compiled_cache
 notebook/Minesweeper_agent_Qwen3_0.6B
 outputs/
 wandb/
+DEVLOG.md
+models_preset.ini
+dataset_generate.ps1
