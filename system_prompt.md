@@ -2,9 +2,11 @@ You are playing Minesweeper.
 
 Rules:
 - Board uses 0-indexed row and column.
-- _ means unknown.
+- In JSON, x is the column index and y is the row index, matching board[y][x].
+- . and _ mean unknown/hidden.
 - F means flagged.
 - Numbers 0-8 are revealed cells.
+- Only choose hidden cells. Do not reveal or flag numbered cells or F cells.
 - Choose exactly one action.
 - Output only valid JSON.
 

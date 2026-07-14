@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from minesweeper.training_pipeline import live_teacher_row_to_sft_row
 from utils.add_thinking_from_teacher import (
     build_live_teacher_row,
+    is_queue_rate_limit_error,
+    is_repeated_reveal_result,
     parse_completion_payload,
     play_live_teacher_sessions,
     render_compact_board,
@@ -156,6 +158,33 @@ class TeacherLiveRunnerTests(unittest.TestCase):
             )
         )
 
+    def test_is_queue_rate_limit_error_detects_provider_queue_limit(self) -> None:
+        error = Exception(
+            "Error code: 429 - {'type': 'too_many_requests_error', 'code': 'queue_exceeded'}"
+        )
+
+        self.assertTrue(is_queue_rate_limit_error(error))
+        self.assertFalse(is_queue_rate_limit_error(ValueError("json decode error")))
+
+    def test_repeated_reveal_result_is_retryable_and_not_persisted(self) -> None:
+        move = {"action": "reveal", "x": 2, "y": 1}
+        state_after = {
+            "status": "in_progress",
+            "last_move": {
+                "action": "reveal",
+                "message": "Tile already revealed.",
+            },
+        }
+
+        self.assertTrue(is_repeated_reveal_result(move=move, state_after=state_after))
+        self.assertFalse(
+            should_persist_training_row(
+                move=move,
+                state_after=state_after,
+                error=None,
+            )
+        )
+
     def test_play_live_teacher_sessions_rejects_non_positive_count(self) -> None:
         with self.assertRaises(ValueError):
             play_live_teacher_sessions(
@@ -170,10 +199,10 @@ class TeacherLiveRunnerTests(unittest.TestCase):
                 width=5,
                 height=5,
                 mine_density=0.15,
-                seed=42,
                 max_turns=10,
                 max_tokens=100,
                 turn_delay=0.0,
+                rate_limit_cooldown=0.0,
                 launch_gui=False,
             )
 
