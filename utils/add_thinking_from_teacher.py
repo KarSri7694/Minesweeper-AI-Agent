@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import secrets
 import subprocess
 import sys
 import time
@@ -158,8 +159,8 @@ def create_remote_game(
     width: int,
     height: int,
     mine_density: float,
-    seed: int | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
+    seed = secrets.randbits(63)
     response = requests.post(
         f"{api_base_url.rstrip('/')}/games",
         json={
@@ -172,7 +173,7 @@ def create_remote_game(
         timeout=10,
     )
     response.raise_for_status()
-    return response.json()
+    return response.json(), seed
 
 
 def get_remote_state(*, api_base_url: str, game_id: str) -> dict[str, Any]:
@@ -201,7 +202,17 @@ def submit_remote_move(
         },
         timeout=10,
     )
-    response.raise_for_status()
+    if not response.ok:
+        detail = response.text
+        try:
+            payload = response.json()
+            detail = str(payload.get("detail", payload))
+        except ValueError:
+            pass
+        raise requests.HTTPError(
+            f"{response.status_code} Client Error: {detail} for url: {response.url}",
+            response=response,
+        )
     return response.json()
 
 
@@ -273,6 +284,62 @@ def stream_teacher_turn(
     return "".join(thinking_chunks), "".join(content_chunks).strip()
 
 
+def is_queue_rate_limit_error(error: Exception) -> bool:
+    status_code = getattr(error, "status_code", None)
+    body = str(error).lower()
+    return (
+        status_code == 429
+        or "error code: 429" in body
+        or "too_many_requests_error" in body
+        or "queue_exceeded" in body
+    )
+
+
+def is_repeated_reveal_result(
+    *,
+    move: dict[str, Any] | None,
+    state_after: dict[str, Any] | None,
+) -> bool:
+    if move is None or state_after is None or move.get("action") != "reveal":
+        return False
+    last_move = state_after.get("last_move") or {}
+    return last_move.get("message") == "Tile already revealed."
+
+
+def append_turn_transcript(
+    *,
+    transcript_path: Path,
+    turn_index: int,
+    state_before: dict[str, Any],
+    state_after: dict[str, Any] | None,
+    thinking_text: str,
+    response_text: str,
+    move: dict[str, Any] | None,
+    error: str | None,
+) -> None:
+    transcript = [
+        f"Turn {turn_index}\n",
+        f"Board before:\n{render_compact_board(state_before['board'])}\n",
+        f"Score before: {state_before['score']}\n",
+        f"Thinking:\n{thinking_text or '[none]'}\n",
+        f"Response:\n{response_text or '[none]'}\n",
+        f"Parsed move: {json.dumps(move) if move is not None else '[none]'}\n",
+    ]
+    if state_after is not None:
+        transcript.append(f"Board after:\n{render_compact_board(state_after['board'])}\n")
+        transcript.append(
+            f"Result: {state_after['last_move']['message']} | "
+            f"Score delta: {state_after['last_move']['score_delta']:+d}\n"
+        )
+        transcript.append(
+            f"Score after: {state_after['score']} | Status after: {state_after['status']}\n"
+        )
+    if error is not None:
+        transcript.append(f"Error: {error}\n")
+    transcript.append("-" * 60 + "\n")
+    append_transcript(transcript_path, "".join(transcript))
+
+
 def build_live_teacher_row(
     *,
     session_id: str,
@@ -339,6 +406,8 @@ def should_persist_training_row(
 ) -> bool:
     if error is not None or move is None or state_after is None:
         return False
+    if is_repeated_reveal_result(move=move, state_after=state_after):
+        return False
 
     revealed_mine = (
         move.get("action") == "reveal"
@@ -365,10 +434,10 @@ def play_live_teacher_session(
     width: int,
     height: int,
     mine_density: float,
-    seed: int | None,
     max_turns: int,
     max_tokens: int,
     turn_delay: float,
+    rate_limit_cooldown: float,
     launch_gui: bool,
 ) -> dict[str, Any]:
     client = create_teacher_client(provider=provider, api_key=api_key, base_url=base_url)
@@ -379,12 +448,11 @@ def play_live_teacher_session(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
 
-    game_state = create_remote_game(
+    game_state, seed = create_remote_game(
         api_base_url=api_base_url,
         width=width,
         height=height,
         mine_density=mine_density,
-        seed=seed,
     )
     game_id = game_state["game_id"]
     maybe_launch_gui(launch_gui=launch_gui, game_id=game_id, api_base_url=api_base_url)
@@ -428,45 +496,80 @@ def play_live_teacher_session(
             f"Score: {state_before['score']} | Status: {state_before['status']} "
             f"| Flags: {state_before['flagged_count']}/{state_before['mine_count']}"
         )
-        print("Teacher output:")
+        while True:
+            print("Teacher output:")
 
-        thinking_text = ""
-        response_text = ""
-        state_after = None
-        move = None
-        error = None
+            thinking_text = ""
+            response_text = ""
+            state_after = None
+            move = None
+            error = None
 
-        try:
-            thinking_text, response_text = stream_teacher_turn(
-                client=client,
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-            )
-            move = parse_completion_payload(
-                f"<think>\n{thinking_text}\n</think>\n\n{response_text}" if thinking_text else response_text,
-                prompt_mode=THINKING_SFT_STAGE.prompt_mode,
-            )
-            if not validate_move(state_before["height"], state_before["width"], move):
-                raise ValueError("Teacher produced an out-of-bounds or invalid move.")
+            try:
+                while True:
+                    try:
+                        thinking_text, response_text = stream_teacher_turn(
+                            client=client,
+                            model=model,
+                            messages=messages,
+                            max_tokens=max_tokens,
+                        )
+                        break
+                    except Exception as exc:
+                        if not is_queue_rate_limit_error(exc):
+                            raise
+                        cooldown = max(0.0, rate_limit_cooldown)
+                        message = (
+                            f"Teacher queue/rate-limit error hit. Cooling down for "
+                            f"{cooldown:g}s, then retrying turn {turn_index} from the same state."
+                        )
+                        print(message)
+                        append_transcript(
+                            transcript_path,
+                            f"Turn {turn_index} retry: {message}\nError: {exc}\n",
+                        )
+                        if cooldown > 0:
+                            time.sleep(cooldown)
 
-            state_after = submit_remote_move(
-                api_base_url=api_base_url,
-                game_id=game_id,
-                move=move,
-            )
-            final_status = state_after["status"]
-            final_score = state_after["score"]
-            print(
-                f"Applied move: {move['action']} ({move['x']}, {move['y']}) | "
-                f"{state_after['last_move']['message']} | "
-                f"Score: {state_after['score']} | Status: {state_after['status']}"
-            )
-            print(render_compact_board(state_after["board"]))
-        except Exception as exc:
-            error = str(exc)
-            final_status = "error"
-            print(f"Turn failed: {error}")
+                move = parse_completion_payload(
+                    f"<think>\n{thinking_text}\n</think>\n\n{response_text}" if thinking_text else response_text,
+                    prompt_mode=THINKING_SFT_STAGE.prompt_mode,
+                )
+                if not validate_move(state_before["height"], state_before["width"], move):
+                    raise ValueError("Teacher produced an out-of-bounds or invalid move.")
+
+                state_after = submit_remote_move(
+                    api_base_url=api_base_url,
+                    game_id=game_id,
+                    move=move,
+                )
+                final_status = state_after["status"]
+                final_score = state_after["score"]
+                print(
+                    f"Applied move: {move['action']} ({move['x']}, {move['y']}) | "
+                    f"{state_after['last_move']['message']} | "
+                    f"Score: {state_after['score']} | Status: {state_after['status']}"
+                )
+                print(render_compact_board(state_after["board"]))
+            except Exception as exc:
+                error = str(exc)
+                final_status = "error"
+                print(f"Turn failed: {error}")
+
+            if is_repeated_reveal_result(move=move, state_after=state_after):
+                append_turn_transcript(
+                    transcript_path=transcript_path,
+                    turn_index=turn_index,
+                    state_before=state_before,
+                    state_after=state_after,
+                    thinking_text=thinking_text,
+                    response_text=response_text,
+                    move=move,
+                    error=error,
+                )
+                print("Repeated reveal of an already revealed tile. Retrying the same turn/state.")
+                continue
+            break
 
         row = build_live_teacher_row(
             session_id=session_id,
@@ -487,27 +590,16 @@ def play_live_teacher_session(
         else:
             print("Skipping dataset write for this turn due to error or mine reveal.")
 
-        transcript = [
-            f"Turn {turn_index}\n",
-            f"Board before:\n{render_compact_board(state_before['board'])}\n",
-            f"Score before: {state_before['score']}\n",
-            f"Thinking:\n{thinking_text or '[none]'}\n",
-            f"Response:\n{response_text or '[none]'}\n",
-            f"Parsed move: {json.dumps(move) if move is not None else '[none]'}\n",
-        ]
-        if state_after is not None:
-            transcript.append(f"Board after:\n{render_compact_board(state_after['board'])}\n")
-            transcript.append(
-                f"Result: {state_after['last_move']['message']} | "
-                f"Score delta: {state_after['last_move']['score_delta']:+d}\n"
-            )
-            transcript.append(
-                f"Score after: {state_after['score']} | Status after: {state_after['status']}\n"
-            )
-        if error is not None:
-            transcript.append(f"Error: {error}\n")
-        transcript.append("-" * 60 + "\n")
-        append_transcript(transcript_path, "".join(transcript))
+        append_turn_transcript(
+            transcript_path=transcript_path,
+            turn_index=turn_index,
+            state_before=state_before,
+            state_after=state_after,
+            thinking_text=thinking_text,
+            response_text=response_text,
+            move=move,
+            error=error,
+        )
 
         if error is not None:
             break
@@ -544,20 +636,18 @@ def play_live_teacher_sessions(
     width: int,
     height: int,
     mine_density: float,
-    seed: int | None,
     max_turns: int,
     max_tokens: int,
     turn_delay: float,
+    rate_limit_cooldown: float,
     launch_gui: bool,
 ) -> list[dict[str, Any]]:
     if num_games < 1:
         raise ValueError("--num-games must be at least 1.")
 
     summaries: list[dict[str, Any]] = []
-    base_seed = seed if seed is not None else None
 
     for game_index in range(num_games):
-        session_seed = None if base_seed is None else base_seed + game_index
         print(f"\n=== Starting game {game_index + 1}/{num_games} ===")
         summary = play_live_teacher_session(
             api_base_url=api_base_url,
@@ -570,10 +660,10 @@ def play_live_teacher_sessions(
             width=width,
             height=height,
             mine_density=mine_density,
-            seed=session_seed,
             max_turns=max_turns,
             max_tokens=max_tokens,
             turn_delay=turn_delay,
+            rate_limit_cooldown=rate_limit_cooldown,
             launch_gui=launch_gui,
         )
         summary["game_index"] = game_index + 1
@@ -594,11 +684,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--width", type=int, default=9)
     parser.add_argument("--height", type=int, default=9)
     parser.add_argument("--mine-density", type=float, default=0.15)
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-games", type=int, default=1)
     parser.add_argument("--max-turns", type=int, default=200)
     parser.add_argument("--max-tokens", type=int, default=80000)
     parser.add_argument("--turn-delay", type=float, default=0.75)
+    parser.add_argument("--rate-limit-cooldown", type=float, default=60.0)
     parser.add_argument("--output-jsonl", default="dataset/live_teacher_thinking.jsonl")
     parser.add_argument("--transcript-path", default="dataset/live_teacher_session.log")
     parser.add_argument("--launch-gui", action="store_true")
@@ -628,10 +718,10 @@ def main(argv: list[str] | None = None) -> None:
         width=args.width,
         height=args.height,
         mine_density=args.mine_density,
-        seed=args.seed,
         max_turns=args.max_turns,
         max_tokens=args.max_tokens,
         turn_delay=args.turn_delay,
+        rate_limit_cooldown=args.rate_limit_cooldown,
         launch_gui=args.launch_gui,
     )
     print("\nAll sessions complete.")
