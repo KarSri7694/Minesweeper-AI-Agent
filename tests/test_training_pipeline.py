@@ -75,6 +75,8 @@ class TrainingPipelineTests(unittest.TestCase):
         )
 
         self.assertIn("Board State: [['.', '1'], ['F', '_']]", prompt)
+        self.assertIn("x is the column index and y is the row index", prompt)
+        self.assertIn("Only choose hidden cells", prompt)
         self.assertIn("Score: 5", prompt)
         self.assertIn("Max Mines: 3", prompt)
 

@@ -82,6 +82,8 @@ def make_stage_system_prompt(base_prompt: str, *, visible_reasoning: bool) -> st
 def build_user_prompt_from_state(state: dict[str, Any], *, include_score: bool = False) -> str:
     lines = [
         f"Board State: {state['board']}",
+        "Coordinates: board[y][x], where x is the column index and y is the row index.",
+        "Only choose hidden cells, shown as '.' or '_'. Do not reveal or flag numbered cells or F cells.",
         f"Max Mines: {state['mine_count']}",
         f"Max Rows: {state['height']}",
         f"Max Columns: {state['width']}",
